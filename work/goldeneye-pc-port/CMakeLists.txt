@@ -24,7 +24,7 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 # (GCC does hard-error on the one struct that declares a member with the same
 # name as an inherited one — CCTVRecord's `pad` — see docs/internals.md.)
 # An explicit -DCMAKE_C_COMPILER=... always wins.
-if(NOT DEFINED CMAKE_C_COMPILER)
+if(NOT ANDROID AND NOT DEFINED CMAKE_C_COMPILER)
   find_program(_GE007_GCC NAMES gcc)
   if(_GE007_GCC)
     set(CMAKE_C_COMPILER "${_GE007_GCC}" CACHE FILEPATH "C compiler" FORCE)
@@ -97,6 +97,7 @@ set(ROMID "ntsc-final" CACHE STRING "ROM id: ntsc-final (US), pal-final (EU), jp
 # reproducing a specific visual bug, but they should not add branches or log
 # plumbing to normal R36S/release builds.
 option(GE_DEV_PROBES "Compile environment-gated Fast3D diagnostic probes" OFF)
+option(GE_ANDROID_OBJECT_ONLY "Android Phase 1: compile all GE sources as objects without final link" OFF)
 if(GE_DEV_PROBES)
   add_compile_definitions(GE_DEV_PROBES=1)
   message(STATUS "Fast3D developer probes: enabled")
@@ -115,7 +116,9 @@ else()
 endif()
 message(STATUS "Target arch: ${TARGET_ARCH} (64bit=${TARGET_IS_64BIT})")
 
-if(WIN32)
+if(ANDROID)
+  set(TARGET_OS "android")
+elseif(WIN32)
   set(TARGET_OS "windows")
 elseif(APPLE)
   set(TARGET_OS "osx")
@@ -177,54 +180,46 @@ configure_file(
   "${CMAKE_SOURCE_DIR}/port/include/versioninfo.h.in"
   "${CMAKE_BINARY_DIR}/port/include/versioninfo.h" @ONLY)
 
-# Host <string.h> path for port/shim/string.h. The N64 include/string.h
-# declares strlen/strchr with `const unsigned char *`, which conflicts with
-# the host declarations that SDL (and other system headers) pull in, and it
-# sits earlier on the include path than the toolchain's own string.h — so the
-# shim cannot use #include_next (it would find the N64 header first). Derive
-# the toolchain include dir from the compiler location (MinGW/MSYS2 layout:
-# bin/../include) and generate an absolute-path include.
-get_filename_component(_PORT_GCC_DIR "${CMAKE_C_COMPILER}" DIRECTORY)
-get_filename_component(PORT_HOST_STRING_H "${_PORT_GCC_DIR}/../include/string.h" ABSOLUTE)
-configure_file(
-  "${CMAKE_SOURCE_DIR}/port/include/hoststring.h.in"
-  "${CMAKE_BINARY_DIR}/port/include/hoststring.h" @ONLY)
-
-# Host <sched.h> path for port/shim/sched.h. The decomp's src/sched.h is on
-# the include path and shadows the system header; libstdc++'s <thread>/gthr
-# headers in the fast3d C++ TUs need the real <sched.h> (cpu_set_t,
-# sched_yield). Both MinGW and Linux keep <sched.h> at bin/../include.
-get_filename_component(PORT_HOST_SCHED_H "${_PORT_GCC_DIR}/../include/sched.h" ABSOLUTE)
-configure_file(
-  "${CMAKE_SOURCE_DIR}/port/include/hostsched.h.in"
-  "${CMAKE_BINARY_DIR}/port/include/hostsched.h" @ONLY)
-
-# Host <stdlib.h> path for port/shim/stdlib.h. The N64 include/stdlib.h
-# typedefs lldiv_t/ldiv_t, which conflict with the host's when both land in
-# one C++ TU (fast3d): MinGW's own sec_api/stdlib_s.h does `#include
-# <stdlib.h>`, which resolves to the N64 header via -I. The shim routes C++
-# TUs to the host header by absolute path (same trick as hoststring.h).
-get_filename_component(PORT_HOST_STDLIB_H "${_PORT_GCC_DIR}/../include/stdlib.h" ABSOLUTE)
-configure_file(
-  "${CMAKE_SOURCE_DIR}/port/include/hoststdlib.h.in"
-  "${CMAKE_BINARY_DIR}/port/include/hoststdlib.h" @ONLY)
-
-# Host <stddef.h> path for port/shim/stddef.h (same reason as stdlib: the N64
-# stub shadows the host header in C++ TUs, hiding max_align_t from cstddef).
-# stddef.h is compiler-internal, not in bin/../include: on a native Linux GCC
-# it lives under lib/gcc/<triple>/<ver>/include. Ask the compiler where it is;
-# fall back to the MinGW bin/../include layout.
-execute_process(
-  COMMAND "${CMAKE_C_COMPILER}" -print-file-name=include/stddef.h
-  OUTPUT_VARIABLE _PORT_GCC_STDDEF OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-if(_PORT_GCC_STDDEF AND EXISTS "${_PORT_GCC_STDDEF}")
-  get_filename_component(PORT_HOST_STDDDEF_H "${_PORT_GCC_STDDEF}" ABSOLUTE)
+# Host libc headers used by the shim layer.
+# Android NDK Clang keeps libc headers under the sysroot; desktop toolchains
+# retain the original compiler-location discovery.
+if(ANDROID)
+  set(PORT_HOST_STRING_H "${CMAKE_SYSROOT}/usr/include/string.h")
+  set(PORT_HOST_SCHED_H "${CMAKE_SYSROOT}/usr/include/sched.h")
+  set(PORT_HOST_STDLIB_H "${CMAKE_SYSROOT}/usr/include/stdlib.h")
+  execute_process(
+    COMMAND "${CMAKE_C_COMPILER}" -print-resource-dir
+    OUTPUT_VARIABLE _GEAND_CLANG_RESOURCE OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  set(PORT_HOST_STDDDEF_H "${_GEAND_CLANG_RESOURCE}/include/stddef.h")
 else()
-  get_filename_component(PORT_HOST_STDDDEF_H "${_PORT_GCC_DIR}/../include/stddef.h" ABSOLUTE)
+  get_filename_component(_PORT_GCC_DIR "${CMAKE_C_COMPILER}" DIRECTORY)
+  get_filename_component(PORT_HOST_STRING_H "${_PORT_GCC_DIR}/../include/string.h" ABSOLUTE)
+  get_filename_component(PORT_HOST_SCHED_H "${_PORT_GCC_DIR}/../include/sched.h" ABSOLUTE)
+  get_filename_component(PORT_HOST_STDLIB_H "${_PORT_GCC_DIR}/../include/stdlib.h" ABSOLUTE)
+  execute_process(
+    COMMAND "${CMAKE_C_COMPILER}" -print-file-name=include/stddef.h
+    OUTPUT_VARIABLE _PORT_GCC_STDDEF OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(_PORT_GCC_STDDEF AND EXISTS "${_PORT_GCC_STDDEF}")
+    get_filename_component(PORT_HOST_STDDDEF_H "${_PORT_GCC_STDDEF}" ABSOLUTE)
+  else()
+    get_filename_component(PORT_HOST_STDDDEF_H "${_PORT_GCC_DIR}/../include/stddef.h" ABSOLUTE)
+  endif()
 endif()
-configure_file(
-  "${CMAKE_SOURCE_DIR}/port/include/hoststddef.h.in"
-  "${CMAKE_BINARY_DIR}/port/include/hoststddef.h" @ONLY)
+
+foreach(_GEAND_HOST_HEADER PORT_HOST_STRING_H PORT_HOST_SCHED_H PORT_HOST_STDLIB_H PORT_HOST_STDDDEF_H)
+  if(NOT EXISTS "${${_GEAND_HOST_HEADER}}")
+    message(FATAL_ERROR "Missing host shim header ${_GEAND_HOST_HEADER}=${${_GEAND_HOST_HEADER}}")
+  endif()
+endforeach()
+
+configure_file("${CMAKE_SOURCE_DIR}/port/include/hoststring.h.in"
+               "${CMAKE_BINARY_DIR}/port/include/hoststring.h" @ONLY)
+configure_file("${CMAKE_SOURCE_DIR}/port/include/hostsched.h.in"
+               "${CMAKE_BINARY_DIR}/port/include/hostsched.h" @ONLY)
+configure_file("${CMAKE_SOURCE_DIR}/port/include/hoststdlib.h.in"
+               "${CMAKE_BINARY_DIR}/port/include/hoststdlib.h" @ONLY)
+configure_file("${CMAKE_SOURCE_DIR}/port/include/hoststddef.h.in"
+               "${CMAKE_BINARY_DIR}/port/include/hoststddef.h" @ONLY)
 
 # ----------------------------------------------------------------------------
 # Compiler definitions & flags
@@ -238,6 +233,9 @@ add_definitions(
 )
 if(TARGET_IS_64BIT)
   add_definitions(-DPLATFORM_64BIT=1)
+endif()
+if(ANDROID)
+  add_definitions(-DPLATFORM_ANDROID=1)
 endif()
 
 # The decomp is big-endian N64 code with unaligned accesses; these flags are
@@ -308,7 +306,16 @@ add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-unused-function>)
 # the Plan 9 extensions explicitly there (superset of -fms-extensions: also the
 # automatic base-pointer conversion the idiom relies on). C only — the decomp
 # is C; fast3d C++ does not use `inherits`.
-if(NOT MINGW)
+if(ANDROID)
+  # NDK Clang supports the decomp's anonymous tagged-member inheritance with
+  # Microsoft extensions. This preserves promoted field access/layout without
+  # rewriting bondtypes.h.
+  add_compile_options($<$<COMPILE_LANGUAGE:C>:-fms-extensions>)
+  # Android's toolchain injects -Werror=format-security. The reconstructed
+  # game contains legacy non-literal printf-style calls that are warnings on
+  # the existing desktop/R36S builds; keep them visible without blocking P1.
+  add_compile_options(-Wno-error=format-security)
+elseif(NOT MINGW)
   add_compile_options($<$<COMPILE_LANGUAGE:C>:-fplan9-extensions>)
   # GCC 14 promoted several long-standing C leniencies to hard errors
   # (int<->pointer for a known prototype, incompatible-pointer arg types,
@@ -329,7 +336,7 @@ endif()
 # base at startup.
 if(MINGW)
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--disable-dynamicbase")
-elseif(UNIX AND NOT APPLE)
+elseif(UNIX AND NOT APPLE AND NOT ANDROID)
   # Linux equivalent of the ASLR-off requirement above: dram_syms.s defines
   # absolute symbols at 0x70000000 referenced through pointer-typed externs. A
   # PIE build (GCC's default on modern distros) emits GOT/relative relocations
@@ -355,7 +362,7 @@ endif()
 # port/shim first: PC-only shadow headers (bondtypes.h, bondconstants.h,
 # PR/gbi.h) that fix N64-compiler assumptions without touching src/ or
 # include/. Inert in the N64 build (its Makefile never sees port/shim).
-include_directories(
+set(GE_PROJECT_INCLUDE_DIRS
   "${CMAKE_SOURCE_DIR}/port/shim"
   "${CMAKE_SOURCE_DIR}"
   "${CMAKE_SOURCE_DIR}/include"
@@ -367,12 +374,32 @@ include_directories(
   "${CMAKE_SOURCE_DIR}/port/include"
   "${CMAKE_BINARY_DIR}/port/include"
 )
+if(ANDROID)
+  foreach(_GE_INCLUDE IN LISTS GE_PROJECT_INCLUDE_DIRS)
+    include_directories("$<$<COMPILE_LANGUAGE:C>:${_GE_INCLUDE}>")
+    # libc++ wrappers must precede project C headers for C++ translation units.
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:SHELL:-idirafter ${_GE_INCLUDE}>")
+  endforeach()
+else()
+  include_directories(${GE_PROJECT_INCLUDE_DIRS})
+endif()
 
 # ----------------------------------------------------------------------------
 # Dependencies: SDL2, zlib, OpenGL
 # ----------------------------------------------------------------------------
 set(LIBS "")
 
+if(ANDROID AND GE_ANDROID_OBJECT_ONLY)
+  if(NOT SDL2_INCLUDE_DIR)
+    message(FATAL_ERROR "GE_ANDROID_OBJECT_ONLY requires -DSDL2_INCLUDE_DIR=<SDL2 source>/include")
+  endif()
+  include_directories(SYSTEM "${SDL2_INCLUDE_DIR}")
+  # Android's NDK sysroot supplies zlib and GLES headers for compilation.
+  set(ZLIB_INCLUDE_DIR "${CMAKE_SYSROOT}/usr/include")
+  include_directories(SYSTEM "${ZLIB_INCLUDE_DIR}")
+  set(ZLIB_LIBRARY z)
+  set(GL_LIBRARY GLESv3)
+else()
 find_package(SDL2 REQUIRED)
 include_directories(SYSTEM "${SDL2_INCLUDE_DIR}")
 list(APPEND LIBS "${SDL2_LIBRARY}")
@@ -383,22 +410,6 @@ if(ZLIB_INCLUDE_DIR)
 endif()
 list(APPEND LIBS "${ZLIB_LIBRARY}")
 
-# Real <zlib.h> for port/src/rzdecomp.c (which backs decompressdata() with real
-# zlib). The game's own src/game/zlib.h sits on the -I path and shadows a plain
-# `#include <zlib.h>` in a port TU, so generate an absolute-path include (same
-# trick as hoststring.h). Prefer find_package(ZLIB)'s dir; fall back to the
-# toolchain include dir (MinGW layout: bin/../include), where
-# mingw-w64-x86_64-zlib installs zlib.h.
-set(PORT_REAL_ZLIB_H "${ZLIB_INCLUDE_DIR}/zlib.h")
-if(NOT EXISTS "${PORT_REAL_ZLIB_H}")
-  set(PORT_REAL_ZLIB_H "${_PORT_GCC_DIR}/../include/zlib.h")
-endif()
-if(NOT EXISTS "${PORT_REAL_ZLIB_H}")
-  message(FATAL_ERROR "Cannot locate the host zlib.h needed by port/src/rzdecomp.c")
-endif()
-configure_file(
-  "${CMAKE_SOURCE_DIR}/port/include/realzlib.h.in"
-  "${CMAKE_BINARY_DIR}/port/include/realzlib.h" @ONLY)
 
 if(NOT GL_LIBRARY)
   if(WIN32)
@@ -422,6 +433,24 @@ if(NOT EXTRA_LIBRARIES)
   endif()
 endif()
 list(APPEND LIBS "${EXTRA_LIBRARIES}")
+endif()
+
+# Real <zlib.h> for port/src/rzdecomp.c (which backs decompressdata() with real
+# zlib). The game's own src/game/zlib.h sits on the -I path and shadows a plain
+# `#include <zlib.h>` in a port TU, so generate an absolute-path include (same
+# trick as hoststring.h). Prefer find_package(ZLIB)'s dir; fall back to the
+# toolchain include dir (MinGW layout: bin/../include), where
+# mingw-w64-x86_64-zlib installs zlib.h.
+set(PORT_REAL_ZLIB_H "${ZLIB_INCLUDE_DIR}/zlib.h")
+if(NOT EXISTS "${PORT_REAL_ZLIB_H}")
+  set(PORT_REAL_ZLIB_H "${_PORT_GCC_DIR}/../include/zlib.h")
+endif()
+if(NOT EXISTS "${PORT_REAL_ZLIB_H}")
+  message(FATAL_ERROR "Cannot locate the host zlib.h needed by port/src/rzdecomp.c")
+endif()
+configure_file(
+  "${CMAKE_SOURCE_DIR}/port/include/realzlib.h.in"
+  "${CMAKE_BINARY_DIR}/port/include/realzlib.h" @ONLY)
 
 # ----------------------------------------------------------------------------
 # Sources
@@ -586,7 +615,7 @@ list(PREPEND SRC_ENGINE "${CMAKE_SOURCE_DIR}")
 # reconstructed game code on the established RelWithDebInfo/-O2 behavior,
 # but let this isolated port layer use -O3. Deliberately no -ffast-math:
 # matrix/clip/fog semantics remain IEEE-compatible.
-if(TARGET_ARCH MATCHES "aarch64" AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(TARGET_ARCH MATCHES "aarch64" AND NOT ANDROID AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
   # RK3326 in the R36S is Cortex-A35. Tune scheduling for that core while
   # keeping the executable on the normal AArch64 ISA baseline, so the same
   # artifact remains usable on compatible ARM64 handhelds.
@@ -614,11 +643,16 @@ set(SRC
 # Target
 # ----------------------------------------------------------------------------
 set(BIN_NAME "ge007${BIN_REGION}.${TARGET_ARCH}")
-add_executable(ge007 ${SRC})
-target_link_libraries(ge007 ${LIBS})
-set_target_properties(ge007 PROPERTIES OUTPUT_NAME "${BIN_NAME}")
-if(WIN32)
-  set_target_properties(ge007 PROPERTIES WIN32_EXECUTABLE TRUE)
+if(ANDROID AND GE_ANDROID_OBJECT_ONLY)
+  add_library(ge007_android_objects OBJECT ${SRC})
+  target_compile_definitions(ge007_android_objects PRIVATE USE_GLES=1)
+  message(STATUS "Android Phase 1 target: ge007_android_objects")
+else()
+  add_executable(ge007 ${SRC})
+  target_link_libraries(ge007 ${LIBS})
+  set_target_properties(ge007 PROPERTIES OUTPUT_NAME "${BIN_NAME}")
+  if(WIN32)
+    set_target_properties(ge007 PROPERTIES WIN32_EXECUTABLE TRUE)
+  endif()
+  message(STATUS "Output binary: ${BIN_NAME}")
 endif()
-
-message(STATUS "Output binary: ${BIN_NAME}")

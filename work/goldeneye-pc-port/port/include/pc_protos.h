@@ -33,6 +33,11 @@
 
 #if defined(PORT) && (defined(__x86_64__) || defined(__aarch64__)) && !defined(__cplusplus)
 
+#if defined(__ANDROID__)
+/* Use Bionic declarations, including its fortified Clang overloads. */
+#include <string.h>
+#endif
+
 #include <PR/ultratypes.h> /* u8..s32, f32, size_t (host on PC) */
 #include <PR/gbi.h>        /* Gfx, Mtx, Vtx, Light (shimmed on PC) */
 #include "bondtypes.h"   /* coord3d, PropRecord, ObjectRecord, ModelFileHeader, bool, ITEM_IDS */
@@ -56,7 +61,11 @@ void assert();
  * <windows.h> later redeclare compatibly; on LLP64 u_long is 64-bit and the
  * high bits are unused for the 16/32-bit values game code passes. */
 unsigned short ntohs(unsigned short);
+#if defined(__ANDROID__)
+u32 ntohl(u32);
+#else
 unsigned long ntohl(unsigned long);
+#endif
 #endif
 
 int GetCurrentThreadStackLimits();
@@ -323,8 +332,10 @@ void matrix_4x4_invert_affine();
 void * memaAlloc();
 void memaFree();
 s32 memaGetLongestFree();
+#if !defined(__ANDROID__)
 int memcmp();
 void * memcpy();
+#endif
 u32 modelFindNextProjectileHitCandidate();
 void modelGetXYExtents();
 s32 modelLoad();
@@ -407,11 +418,13 @@ bool stanTileHasZeroArea();
 void stop_recording_ramrom();
 void store_favorite_weapon_current_player();
 void store_osgetcount();
+#if !defined(__ANDROID__)
 char * strcat();
 int strcmp();
 char * strcpy();
 size_t strlen();
 char * strncpy();
+#endif
 long int strtol();
 void sub_GAME_7F008DE4();
 s32 sub_GAME_7F03DB70();
